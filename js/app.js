@@ -16,24 +16,41 @@
 
   var state = load();
 
+  function normalizeState(s) {
+    s = s || {};
+    if (!s.targets) s.targets = DEFAULTS.targets;
+    if (!s.checkins) s.checkins = [];
+    if (!s.records) s.records = {};
+    if (!s.timeLog) s.timeLog = {};
+    if (!s.pomodoro) s.pomodoro = DEFAULTS.pomodoro;
+    return s;
+  }
   function load() {
     try {
       var raw = localStorage.getItem(STORE_KEY);
       if (!raw) return JSON.parse(JSON.stringify(DEFAULTS));
-      var s = JSON.parse(raw);
-      // 合并缺省，防止旧数据缺字段
-      if (!s.targets) s.targets = DEFAULTS.targets;
-      if (!s.checkins) s.checkins = [];
-      if (!s.records) s.records = {};
-      if (!s.timeLog) s.timeLog = {};
-      if (!s.pomodoro) s.pomodoro = DEFAULTS.pomodoro;
-      return s;
+      return normalizeState(JSON.parse(raw));
     } catch (e) {
       return JSON.parse(JSON.stringify(DEFAULTS));
     }
   }
+
+  // ---------- 云同步配置（与业务数据分离，独立存储）----------
+  var SYNC_KEY = 'kaoyan_sync_cfg';
+  function loadCfg() {
+    try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch (e) { return {}; }
+  }
+  function saveCfg(c) {
+    try { localStorage.setItem(SYNC_KEY, JSON.stringify(c)); } catch (e) {}
+  }
+  var autoPushTimer = null;
   function save() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {}
+    var cfg = loadCfg();
+    if (cfg.autoSync && cfg.token) {
+      clearTimeout(autoPushTimer);
+      autoPushTimer = setTimeout(function () { pushToCloud(); }, 3000);
+    }
   }
 
   // ---------- 日期工具 ----------
@@ -525,6 +542,19 @@
       + '<div><label>长休息间隔</label><input id="p-every" type="number" value="' + state.pomodoro.longEvery + '" /></div></div>';
     html += '<button class="btn block" id="save-pomo" style="margin-top:14px">保存番茄设置</button></div>';
 
+    // 云同步（GitHub 私有仓库当云盘）
+    var cfg = loadCfg();
+    html += '<div class="card"><div class="card-title">☁️ 云同步（GitHub 私有仓库）</div>'
+      + '<p class="modal-sub" style="margin:0 0 10px">把数据永久存进你的私有仓库，多设备同步、重装不丢。需要带 <b>repo</b> 权限的 GitHub 个人令牌。</p>'
+      + '<label>GitHub Token</label><input id="sync-token" type="password" placeholder="ghp_xxx（仅存本机，不上传他人）" autocomplete="off" />'
+      + '<label>仓库 owner/repo</label><input id="sync-repo" placeholder="zhangwei6321-spec/kaoyan-app" autocomplete="off" />'
+      + '<div class="field-row" style="margin-top:10px;align-items:center"><label style="margin:0;font-weight:400"><input type="checkbox" id="sync-auto" /> 自动同步（每次改动后上传）</label></div>'
+      + '<div class="field-row" style="margin-top:6px;align-items:center"><label style="margin:0;font-weight:400"><input type="checkbox" id="sync-pullstart" /> 启动时自动从云端拉取</label></div>'
+      + '<div style="margin-top:12px;display:flex;gap:10px">'
+      + '<button class="btn" id="sync-push" style="flex:1">立即上传</button>'
+      + '<button class="btn light" id="sync-pull" style="flex:1">从云端恢复</button></div>'
+      + '<div id="sync-status" class="sync-status"></div></div>';
+
     html += '<div class="card"><div class="card-title">数据管理</div>'
       + '<button class="btn block light" id="export-data">导出数据（JSON）</button>'
       + '<button class="btn block danger" id="reset-data" style="margin-top:10px">清空全部数据</button></div>';
@@ -566,6 +596,97 @@
         save(); render(); toast('已清空');
       }
     };
+
+    // ---- 云同步绑定 ----
+    var cfgNow = loadCfg();
+    var tkEl = document.getElementById('sync-token'); if (tkEl) tkEl.value = cfgNow.token || '';
+    var rpEl = document.getElementById('sync-repo'); if (rpEl) rpEl.value = cfgNow.repo || 'zhangwei6321-spec/kaoyan-app';
+    var saEl = document.getElementById('sync-auto'); if (saEl) saEl.checked = !!cfgNow.autoSync;
+    var spEl = document.getElementById('sync-pullstart'); if (spEl) spEl.checked = !!cfgNow.pullOnStart;
+
+    function persistSyncCfg() {
+      var c = loadCfg();
+      c.token = (document.getElementById('sync-token').value || '').trim();
+      c.repo = (document.getElementById('sync-repo').value || '').trim() || 'zhangwei6321-spec/kaoyan-app';
+      c.autoSync = document.getElementById('sync-auto').checked;
+      c.pullOnStart = document.getElementById('sync-pullstart').checked;
+      saveCfg(c);
+      updateSyncStatus();
+    }
+    ['sync-token', 'sync-repo', 'sync-auto', 'sync-pullstart'].forEach(function (id) {
+      var e = document.getElementById(id); if (e) e.onchange = persistSyncCfg;
+    });
+    var pushB = document.getElementById('sync-push'); if (pushB) pushB.onclick = function () { persistSyncCfg(); pushToCloud(); };
+    var pullB = document.getElementById('sync-pull'); if (pullB) pullB.onclick = function () { persistSyncCfg(); pullFromCloud(); };
+    updateSyncStatus();
+  }
+
+  // ---------- 云同步逻辑（GitHub 私有仓库当云盘）----------
+  function ghApi(method, path, body, token) {
+    var opts = {
+      method: method,
+      headers: {
+        'Authorization': 'token ' + token,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      }
+    };
+    if (body) opts.body = JSON.stringify(body);
+    return fetch('https://api.github.com' + path, opts).then(function (r) {
+      return r.json().then(function (j) { return { ok: r.ok, status: r.status, data: j }; })
+        .catch(function () { return { ok: r.ok, status: r.status, data: {} }; });
+    }).catch(function (e) { return { ok: false, status: 0, data: { message: e.message } }; });
+  }
+
+  function utoa(str) { return btoa(unescape(encodeURIComponent(str))); }
+  function atou(b64) { return decodeURIComponent(escape(atob(b64.replace(/\s/g, '')))); }
+
+  function setLastSync(d) { var c = loadCfg(); c.lastSync = d.toISOString(); saveCfg(c); }
+
+  function updateSyncStatus() {
+    var el = document.getElementById('sync-status'); if (!el) return;
+    var cfg = loadCfg();
+    if (!cfg.token) { el.textContent = '未配置 Token，无法同步'; el.className = 'sync-status warn'; return; }
+    if (cfg.lastSync) {
+      el.textContent = '上次同步：' + new Date(cfg.lastSync).toLocaleString();
+      el.className = 'sync-status ok';
+    } else { el.textContent = '已配置，尚未同步过'; el.className = 'sync-status warn'; }
+  }
+
+  function pushToCloud() {
+    var cfg = loadCfg();
+    if (!cfg.token) { toast('请先填写 GitHub Token'); return; }
+    var repo = cfg.repo || 'zhangwei6321-spec/kaoyan-app';
+    var path = 'data/sync.json';
+    updateSyncStatus();
+    toast('正在上传…');
+    ghApi('GET', '/repos/' + repo + '/contents/' + path, null, cfg.token).then(function (res) {
+      var sha = (res.ok && res.data && res.data.sha) ? res.data.sha : null;
+      var payload = { message: 'sync ' + new Date().toISOString(), content: utoa(JSON.stringify(state)), branch: 'main' };
+      if (sha) payload.sha = sha;
+      return ghApi('PUT', '/repos/' + repo + '/contents/' + path, payload, cfg.token).then(function (r2) {
+        if (r2.ok) { setLastSync(new Date()); updateSyncStatus(); toast('已上传到云端 ☁️'); }
+        else { toast('上传失败：' + ((r2.data && r2.data.message) || ('HTTP ' + r2.status))); }
+      });
+    }).catch(function (e) { toast('上传出错：' + e.message); });
+  }
+
+  function pullFromCloud() {
+    var cfg = loadCfg();
+    if (!cfg.token) { toast('请先填写 GitHub Token'); return; }
+    var repo = cfg.repo || 'zhangwei6321-spec/kaoyan-app';
+    var path = 'data/sync.json';
+    toast('正在拉取…');
+    ghApi('GET', '/repos/' + repo + '/contents/' + path, null, cfg.token).then(function (res) {
+      if (!res.ok) { toast('云端暂无数据或读取失败'); return; }
+      try {
+        var cloud = JSON.parse(atou(res.data.content || ''));
+        if (!confirm('将从云端覆盖当前本地数据，确定继续？')) { toast('已取消'); return; }
+        state = normalizeState(cloud);
+        save(); render(); setLastSync(new Date()); updateSyncStatus();
+        toast('已从云端恢复 ✅');
+      } catch (e) { toast('解析云端数据失败：' + e.message); }
+    }).catch(function (e) { toast('拉取出错：' + e.message); });
   }
 
   // ---------- 通知 ----------
@@ -606,4 +727,12 @@
     });
   }
   switchView('countdown');
+
+  // 启动后若开启「自动从云端拉取」，则拉回云端数据
+  (function () {
+    var c = loadCfg();
+    if (c.pullOnStart && c.token) {
+      setTimeout(function () { pullFromCloud(); }, 1000);
+    }
+  })();
 })();
