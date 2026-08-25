@@ -1,0 +1,51 @@
+name: keep-alive
+
+# 目的：定时 ping 线上地址，避免 Render 免费 Web Service 因 15 分钟无流量而休眠。
+# 说明：Render 免费 Static Site 不会休眠，此 workflow 仅作为保底（部署成 Web Service 时生效）。
+# 自定义：在仓库 Settings → Secrets and variables → Actions → Variables 新增
+#         KEEPALIVE_URL（可写多个地址，用空格分隔）即可覆盖默认值。
+
+on:
+  schedule:
+    # 每 5 分钟触发一次（GitHub 排队高峰可能延迟数分钟，故 job 内再补 ping）
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: keep-alive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Ping targets
+        env:
+          URLS: ${{ vars.KEEPALIVE_URL }}
+        run: |
+          set -u
+          TARGETS="${URLS:-}"
+          if [ -z "$TARGETS" ]; then
+            TARGETS="https://kaoyan-app.onrender.com/"
+          fi
+          echo "targets: $TARGETS"
+
+          ping_once () {
+            round="$1"
+            for u in $TARGETS; do
+              start=$(date +%s)
+              code=$(curl -sS -o /dev/null -L --max-time 90 \
+                       -A "keep-alive-bot/1.0 (+github-actions)" \
+                       -w '%{http_code}' "$u" || echo "000")
+              end=$(date +%s)
+              echo "[round $round] $u -> HTTP $code in $((end-start))s"
+            done
+          }
+
+          # 两轮 ping，拉开 150 秒，抵消 GitHub 定时调度的延迟抖动
+          ping_once 1
+          sleep 150
+          ping_once 2
+
+          echo "keep-alive finished at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
