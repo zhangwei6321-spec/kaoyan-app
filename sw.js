@@ -1,4 +1,5 @@
-const CACHE = 'kaoyan-app-v1';
+// 缓存版本升级：每次改版就 +1，自动让旧缓存失效
+const CACHE = 'kaoyan-app-v2';
 const FILES = [
   './',
   './index.html',
@@ -22,15 +23,16 @@ self.addEventListener('activate', function (e) {
   );
 });
 
+// 网络优先：在线时始终拉取最新文件，离线时回退到缓存（保证更新即时生效）
 self.addEventListener('fetch', function (e) {
   if (e.request.method !== 'GET') return;
   e.respondWith(
-    caches.match(e.request).then(function (hit) {
-      return hit || fetch(e.request).then(function (res) {
-        var copy = res.clone();
-        caches.open(CACHE).then(function (c) { c.put(e.request, copy); });
-        return res;
-      }).catch(function () { return hit; });
+    fetch(e.request).then(function (res) {
+      var copy = res.clone();
+      caches.open(CACHE).then(function (c) { c.put(e.request, copy); });
+      return res;
+    }).catch(function () {
+      return caches.match(e.request);
     })
   );
 });
