@@ -160,3 +160,10 @@ label { font-size: 13px; color: var(--muted); display:block; margin: 10px 0 5px;
 .modal h3 { margin:0 0 6px; font-size:18px; }
 .modal .modal-sub { font-size:13px; color:var(--muted); margin:0 0 8px;}
 .modal-actions { display:flex; gap:10px; margin-top:16px; }
+
+/* 云同步状态 */
+.sync-status { margin-top:10px; font-size:12px; padding:7px 10px; border-radius:10px; }
+.sync-status.ok { background:#e8f6ee; color:#1a7f43; }
+.sync-status.warn { background:#fff4e5; color:#b26a00; }
+#sync-token, #sync-repo { width:100%; }
+input[type="checkbox"] { width:auto; margin-right:6px; }
